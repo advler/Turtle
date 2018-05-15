@@ -33,9 +33,9 @@ namespace QuantConnect.Algorithm.CSharp
     {
         //const values
         private const decimal TOTALCASH = 10000;                //总资金
-        private const int DAYS = 20;                            //n日平均
-        private const decimal PERC = 0.01M;                     //账户规模的百分比
-        private const decimal SIZEL = 1000;                     //每只证券头寸上限（单位：元）
+        private const int DAYINTERVAL = 20;                     //n日平均
+        private const decimal ACCOUNTPERC = 0.01M;              //账户规模的百分比
+        private const decimal PERSIZELIMIT = 1000;              //每只证券头寸上限（单位：元）
 
         private Dictionary<String, TurtleEquity> stocks = new Dictionary<String, TurtleEquity>();      //portfolio corresponding dic
 
@@ -125,7 +125,7 @@ namespace QuantConnect.Algorithm.CSharp
                 if (stk.PDN >= 0)           //非首日计算头寸
                 {
                     //calculate daily N value
-                    stk.N = ((DAYS - 1)* stk.PDN + tr) / DAYS;               
+                    stk.N = ((DAYINTERVAL - 1)* stk.PDN + tr) / DAYINTERVAL;               
                 }
                 //非首日计算头寸，to be fixed
                 else
@@ -141,7 +141,7 @@ namespace QuantConnect.Algorithm.CSharp
             }
 
             //计算头寸规模
-            stk.Size = TOTALCASH * PERC / stk.N;
+            stk.Size = TOTALCASH * ACCOUNTPERC / stk.N;
             stk.PDN = stk.N;
         }
 
