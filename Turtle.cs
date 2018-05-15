@@ -55,11 +55,11 @@ namespace QuantConnect.Algorithm.CSharp
             stockSelection();
 
             //consolidate one day data
-            foreach (Symbol key in Portfolio.Keys)
+            foreach (var security in Securities)
             {
                 var oneDayConsolidator = new TradeBarConsolidator(TimeSpan.FromDays(1));
                 oneDayConsolidator.DataConsolidated += OneDayBarHandler;
-                SubscriptionManager.AddConsolidator(key, oneDayConsolidator);
+                SubscriptionManager.AddConsolidator(security.Key, oneDayConsolidator);
             }
         }
 
@@ -150,6 +150,19 @@ namespace QuantConnect.Algorithm.CSharp
             Debug("Symbol:" + consolidated.Symbol + " One-day data consolidation at " + Time);
 
             positionSetting(consolidated);
+        }
+    }
+
+    public class TurtleEquity
+    {
+        public decimal PDN { get; set; }            //previous day N value
+        public decimal N { get; set; }              //today N value
+        public decimal Size { get; set; }           //头寸规模(单位：股)
+
+        public TurtleEquity()
+        {
+            this.PDN = -1;
+            this.Size = -1;
         }
     }
 }
