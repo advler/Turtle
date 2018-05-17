@@ -21,6 +21,7 @@ using QuantConnect.Data.Market;
 using QuantConnect.Securities.Equity;
 using QuantConnect.Securities;
 using QuantConnect.Indicators;
+using QuantConnect.Orders;
 
 namespace QuantConnect.Algorithm.CSharp
 {
@@ -58,6 +59,15 @@ namespace QuantConnect.Algorithm.CSharp
             //select stocks to be traded.
             stockSelection();
 
+            foreach (var val in _sd.Values)
+            {
+                Schedule.On(DateRules.EveryDay(val.Symbol), TimeRules.AfterMarketOpen(val.Symbol, -1), () =>
+                {
+                    Debug("EveryDay." + val.Symbol.ToString() + " initialize at: " + Time);
+                    val.dailylastsettledprice = -1;
+                });
+            }
+            
             SetWarmup(TimeSpan.FromDays(NUMDAYWU));
         }
 
@@ -69,6 +79,22 @@ namespace QuantConnect.Algorithm.CSharp
         {
             // we are only using warmup for indicator spooling, so wait for us to be warm then continue
             if (IsWarmingUp) return;
+
+            foreach (var sd in _sd.Values)
+            {
+                if (sd.IsReady)
+                {
+                    var lastPriceTime = sd.Close.Current.Time;
+                    // only make decisions when we have data on our requested resolution
+                    if (lastPriceTime.RoundDown(sd.Security.Resolution.ToTimeSpan()) == lastPriceTime)
+                    {
+                        sd.Update();
+                    }
+                } else
+                {
+                    continue;
+                }
+            }
 
             //SetHoldings example
             //if (!Portfolio.Invested)
@@ -179,26 +205,97 @@ namespace QuantConnect.Algorithm.CSharp
                 get { return Security.Holdings.Quantity; }
             }
 
+            public readonly Identity Close;
             public readonly ExponentialMovingAverage EMA;
             public readonly Maximum MAX;
 
-
             private readonly Turtle _algorithm;
 
-            public decimal Position { get; set; }
+            public decimal Position { get; set; }                            //持仓上限（单位股）
+            public decimal dailylastsettledprice { get; set; }               //当日最近成交价
 
             public SymbolData(Symbol symbol, Turtle algorithm)
             {
                 Symbol = symbol;
                 Security = algorithm.Securities[symbol];
-                Position = 0;                       //持仓上限（单位股）
+                Position = 0;
+                dailylastsettledprice = -1;
 
+                Close = algorithm.Identity(symbol);
                 EMA = algorithm.EMA(symbol, NUMDAYAVG, TimeSpan.FromDays(1));
                 MAX = algorithm.MAX(symbol, NUMDAYMAX, TimeSpan.FromDays(1));
 
                 // if we're receiving daily
 
                 _algorithm = algorithm;
+            }
+
+            public bool IsReady
+            {
+                get { return Close.IsReady && MAX.IsReady & EMA.IsReady; }
+            }
+
+            public void Update()
+            {
+                OrderTicket ticket;
+                TryEnter(out ticket);
+                TryExit(out ticket);
+            }
+
+            public bool TryEnter(out OrderTicket ticket)
+            {
+                ticket = null;
+                if (Security.Invested)
+                {
+                    // can't enter if we're already in
+                    return false;
+                }
+
+                int qty = 0;
+                decimal limit = 0m;
+                if (IsUptrend)
+                {
+                    // 100 order lots
+                    qty = LotSize;
+                    limit = Security.Low;
+                }
+                else if (IsDowntrend)
+                {
+                    limit = Security.High;
+                    qty = -LotSize;
+                }
+                if (qty != 0)
+                {
+                    ticket = _algorithm.LimitOrder(Symbol, qty, limit, "TryEnter at: " + limit);
+                }
+                return qty != 0;
+            }
+
+            public bool TryExit(out OrderTicket ticket)
+            {
+                const decimal exitTolerance = 1 + 2 * PercentTolerance;
+
+                ticket = null;
+                if (!Security.Invested)
+                {
+                    // can't exit if we haven't entered
+                    return false;
+                }
+
+                decimal limit = 0m;
+                if (Security.Holdings.IsLong && Close * exitTolerance < EMA)
+                {
+                    limit = Security.High;
+                }
+                else if (Security.Holdings.IsShort && Close > EMA * exitTolerance)
+                {
+                    limit = Security.Low;
+                }
+                if (limit != 0)
+                {
+                    ticket = _algorithm.LimitOrder(Symbol, -Quantity, limit, "TryExit at: " + limit);
+                }
+                return -Quantity != 0;
             }
         }
     }
