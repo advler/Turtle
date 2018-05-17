@@ -19,6 +19,8 @@ using QuantConnect.Data;
 using QuantConnect.Data.Consolidators;
 using QuantConnect.Data.Market;
 using QuantConnect.Securities.Equity;
+using QuantConnect.Securities;
+using QuantConnect.Indicators;
 
 namespace QuantConnect.Algorithm.CSharp
 {
@@ -33,11 +35,12 @@ namespace QuantConnect.Algorithm.CSharp
     {
         //const values
         private const decimal TOTALCASH = 10000;                //总资金
-        private const int DAYINTERVAL = 20;                     //n日平均
+        private const int DAYINTERVAL = 1;                     //n日平均
+        private const int DAWARMINGUP = 4;                      //warming up days
         private const decimal ACCOUNTPERC = 0.01M;              //账户规模的百分比
         private const decimal PERSIZELIMIT = 1000;              //每只证券头寸上限（单位：元）
 
-        private Dictionary<String, TurtleEquity> stocks = new Dictionary<String, TurtleEquity>();      //portfolio corresponding dic
+        private readonly Dictionary<Symbol, SymbolData> _sd = new Dictionary<Symbol, SymbolData>();      //portfolio corresponding dic
 
         /// <summary>
         /// Initialise the data and resolution required, as well as the cash and start-end dates for your algorithm. All algorithms must initialized.
@@ -54,13 +57,7 @@ namespace QuantConnect.Algorithm.CSharp
             //select stocks to be traded.
             stockSelection();
 
-            //consolidate one day data
-            foreach (var security in Securities)
-            {
-                var oneDayConsolidator = new TradeBarConsolidator(TimeSpan.FromDays(1));
-                oneDayConsolidator.DataConsolidated += OneDayBarHandler;
-                SubscriptionManager.AddConsolidator(security.Key, oneDayConsolidator);
-            }
+            SetWarmup(TimeSpan.FromDays(DAWARMINGUP));
         }
 
         /// <summary>
@@ -69,6 +66,9 @@ namespace QuantConnect.Algorithm.CSharp
         /// <param name="data">Slice object keyed by symbol containing the stock data</param>
         public override void OnData(Slice data)
         {
+            // we are only using warmup for indicator spooling, so wait for us to be warm then continue
+            if (IsWarmingUp) return;
+
             //SetHoldings example
             //if (!Portfolio.Invested)
             //{
@@ -95,74 +95,91 @@ namespace QuantConnect.Algorithm.CSharp
 
         private void stockSelection()
         {
-            stocks.Clear();
+            _sd.Clear();
 
             //Add individual stocks.
-            stocks.Add("IBM", new TurtleEquity());
-            stocks.Add("SPY", new TurtleEquity());
+            AddEquity("SPY", Resolution.Minute, Market.USA);
+            AddEquity("IBM", Resolution.Minute, Market.USA);
 
-            foreach (String key in stocks.Keys)
+            foreach (var security in Securities)
             {
-                Debug("Stock: " + key + " added to the portfolio.");
-                AddEquity(key, Resolution.Minute, Market.USA);
+                _sd.Add(security.Key, new SymbolData(security.Key, this));
             }
         }
 
-        private void positionSetting(TradeBar data)
+        //set position for each stock
+        private void positionSetting(Symbol symbol, IndicatorBase<IndicatorDataPoint> data)
         {
-            TurtleEquity stk = null;
+            SymbolData sd = null;
 
-            if (stocks.TryGetValue(data.Symbol.ToString(), out stk))
+            if (_sd.TryGetValue(symbol, out sd))
             {
-                Debug("Calculate daily N for the Symbol:" + data.Symbol + " at: " + Time);
-
-                //get the daily max difference
-                decimal tr = Math.Max(data.High - data.Low, data.High - data.Close);
-                tr = Math.Max(tr, data.Close - data.Low);
-                tr = Math.Max(tr, data.High - data.Open);
-                tr = Math.Max(tr, data.Open - data.Low);
-
-                if (stk.PDN >= 0)           //非首日计算头寸
-                {
-                    //calculate daily N value
-                    stk.N = ((DAYINTERVAL - 1)* stk.PDN + tr) / DAYINTERVAL;               
-                }
-                //非首日计算头寸，to be fixed
-                else
-                {
-                    stk.N = tr;
-                }
-            } else
+                Debug("Calculate position value for the Symbol:" + symbol.ToString() + " at: " + Time);
+                sd.Position = TOTALCASH * ACCOUNTPERC / data;
+            }
+            else
             {
-                Error("Can not calculate daily N for the Symbol:" + data.Symbol + " at: " + Time);
-                stk.PDN = -1;
-                stk.Size = -1;
-                return;
+                Error("Can not calculate position value for the Symbol:" + symbol.ToString() + " at: " + Time);
+                sd.Position = 0;
+            }
+        }
+
+        public ExponentialMovingAverage EMA(Symbol symbol, int period, TimeSpan interval, Func<TradeBar, decimal> selector = null)
+        {
+            var ema = new ExponentialMovingAverage(symbol.ToString() + "_EMA_" + period + "_" + interval.ToString(), period);
+            RegisterIndicator(symbol, ema, interval, selector);
+            return ema;
+        }
+
+        public void RegisterIndicator(Symbol symbol, IndicatorBase<IndicatorDataPoint> indicator, TimeSpan interval, Func<TradeBar, decimal> selector = null)
+        {
+            // Calculate the daily actual max price difference 
+            selector = selector ?? (x => Math.Max((Math.Max((Math.Max((Math.Max(x.High - x.Low,
+                x.High - x.Close)), x.Close - x.Low)), x.High - x.Open)), x.Open - x.Low));
+
+            var consolidator = new TradeBarConsolidator(interval);
+
+            // register the consolidator for automatic updates via SubscriptionManager
+            SubscriptionManager.AddConsolidator(symbol, consolidator);
+
+            // attach to the DataConsolidated event so it updates our indicator
+            consolidator.DataConsolidated += (sender, consolidated) =>
+            {
+                var value = selector(consolidated);
+                indicator.Update(new IndicatorDataPoint(consolidated.Symbol, consolidated.EndTime, value));
+                positionSetting(symbol, indicator);
+            };
+        }
+
+
+        class SymbolData
+        {
+            public readonly Symbol Symbol;
+            public readonly Security Security;
+
+            public decimal Quantity
+            {
+                get { return Security.Holdings.Quantity; }
             }
 
-            //计算头寸规模
-            stk.Size = TOTALCASH * ACCOUNTPERC / stk.N;
-            stk.PDN = stk.N;
-        }
+            public readonly ExponentialMovingAverage EMA;
 
-        private void OneDayBarHandler(object sender, TradeBar consolidated)
-        {
-            Debug("Symbol:" + consolidated.Symbol + " One-day data consolidation at " + Time);
+            private readonly Turtle _algorithm;
 
-            positionSetting(consolidated);
-        }
-    }
+            public decimal Position { get; set; }
 
-    public class TurtleEquity
-    {
-        public decimal PDN { get; set; }            //previous day N value
-        public decimal N { get; set; }              //today N value
-        public decimal Size { get; set; }           //头寸规模(单位：股)
+            public SymbolData(Symbol symbol, Turtle algorithm)
+            {
+                Symbol = symbol;
+                Security = algorithm.Securities[symbol];
+                Position = 0;
 
-        public TurtleEquity()
-        {
-            this.PDN = -1;
-            this.Size = -1;
+                EMA = algorithm.EMA(symbol, DAYINTERVAL, TimeSpan.FromDays(1));
+
+                // if we're receiving daily
+
+                _algorithm = algorithm;
+            }
         }
     }
 }
