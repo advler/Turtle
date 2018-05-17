@@ -64,7 +64,7 @@ namespace QuantConnect.Algorithm.CSharp
                 Schedule.On(DateRules.EveryDay(val.Symbol), TimeRules.AfterMarketOpen(val.Symbol, -1), () =>
                 {
                     Debug("EveryDay." + val.Symbol.ToString() + " initialize at: " + Time);
-                    val.dailylastsettledprice = -1;
+                    val.Dailylastsettledprice = -1;
                 });
             }
             
@@ -114,11 +114,14 @@ namespace QuantConnect.Algorithm.CSharp
             //}
         }
 
-        //public override void OnOrderEvent(OrderEvent orderEvent)
-        //{
-        //    var order = Transactions.GetOrderById(orderEvent.OrderId);
-        //    Console.WriteLine("Print: {0}: {1}: {2}", Time, order.Type, orderEvent);
-        //}
+        public override void OnOrderEvent(OrderEvent fill)
+        {
+            SymbolData sd;
+            if (_sd.TryGetValue(fill.Symbol, out sd))
+            {
+                sd.OnOrderEvent(fill);
+            }
+        }
 
         private void stockSelection()
         {
@@ -142,7 +145,7 @@ namespace QuantConnect.Algorithm.CSharp
             if (_sd.TryGetValue(symbol, out sd))
             {
                 Debug("Calculate position value for the Symbol:" + symbol.ToString() + " at: " + Time);
-                sd.Position = TOTALCASH * ACCOUNTPERC / data;
+                sd.Position = (int)(TOTALCASH * ACCOUNTPERC / data);
             }
             else
             {
@@ -211,15 +214,17 @@ namespace QuantConnect.Algorithm.CSharp
 
             private readonly Turtle _algorithm;
 
-            public decimal Position { get; set; }                            //持仓上限（单位股）
-            public decimal dailylastsettledprice { get; set; }               //当日最近成交价
+            public int Position { get; set; }                            //持仓上限（单位股）
+            public decimal Dailylastsettledprice { get; set; }               //当日最近成交价
+            public bool Trading { get; set; }                               //some transactions on this stock is on going
 
             public SymbolData(Symbol symbol, Turtle algorithm)
             {
                 Symbol = symbol;
                 Security = algorithm.Securities[symbol];
                 Position = 0;
-                dailylastsettledprice = -1;
+                Dailylastsettledprice = -1;
+                Trading = false;
 
                 Close = algorithm.Identity(symbol);
                 EMA = algorithm.EMA(symbol, NUMDAYAVG, TimeSpan.FromDays(1));
@@ -245,30 +250,34 @@ namespace QuantConnect.Algorithm.CSharp
             public bool TryEnter(out OrderTicket ticket)
             {
                 ticket = null;
-                if (Security.Invested)
+
+                //if we reach the position limit then exit
+                int hardlimit = (int)(PERSIZELIMIT / Security.High);
+                if (Security.Holdings.Quantity >= hardlimit ||
+                    Security.Holdings.Quantity >= Position)
                 {
-                    // can't enter if we're already in
                     return false;
                 }
 
-                int qty = 0;
-                decimal limit = 0m;
-                if (IsUptrend)
+                if (Dailylastsettledprice < 0 && !Trading)          //haven't made any trade current day
                 {
-                    // 100 order lots
-                    qty = LotSize;
-                    limit = Security.Low;
-                }
-                else if (IsDowntrend)
+                    if (Security.Low >= MAX)
+                    {
+                        ticket = _algorithm.LimitOrder(Symbol, 1, Security.Low, "TryEnter at: " + Security.Low);
+                        Trading = true;
+                        return true;
+                    }
+                } else if (Dailylastsettledprice > 0 && !Trading)
                 {
-                    limit = Security.High;
-                    qty = -LotSize;
+                    if (Security.Low >= Dailylastsettledprice + EMA / 2)
+                    {
+                        ticket = _algorithm.LimitOrder(Symbol, 1, Security.Low, "TryEnter at: " + Security.Low);
+                        Trading = true;
+                        return true;
+                    }
                 }
-                if (qty != 0)
-                {
-                    ticket = _algorithm.LimitOrder(Symbol, qty, limit, "TryEnter at: " + limit);
-                }
-                return qty != 0;
+
+                return false;
             }
 
             public bool TryExit(out OrderTicket ticket)
@@ -296,6 +305,11 @@ namespace QuantConnect.Algorithm.CSharp
                     ticket = _algorithm.LimitOrder(Symbol, -Quantity, limit, "TryExit at: " + limit);
                 }
                 return -Quantity != 0;
+            }
+
+            public void OnOrderEvent(OrderEvent fill)
+            {
+                
             }
         }
     }
