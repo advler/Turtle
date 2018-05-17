@@ -35,8 +35,9 @@ namespace QuantConnect.Algorithm.CSharp
     {
         //const values
         private const decimal TOTALCASH = 10000;                //总资金
-        private const int DAYINTERVAL = 1;                     //n日平均
-        private const int DAWARMINGUP = 4;                      //warming up days
+        private const int NUMDAYAVG = 1;                        //n日取平均值
+        private const int NUMDAYWU = 4;                         //warming up days
+        private const int NUMDAYMAX = 3;                        //n日取最大值
         private const decimal ACCOUNTPERC = 0.01M;              //账户规模的百分比
         private const decimal PERSIZELIMIT = 1000;              //每只证券头寸上限（单位：元）
 
@@ -57,7 +58,7 @@ namespace QuantConnect.Algorithm.CSharp
             //select stocks to be traded.
             stockSelection();
 
-            SetWarmup(TimeSpan.FromDays(DAWARMINGUP));
+            SetWarmup(TimeSpan.FromDays(NUMDAYWU));
         }
 
         /// <summary>
@@ -127,15 +128,32 @@ namespace QuantConnect.Algorithm.CSharp
         public ExponentialMovingAverage EMA(Symbol symbol, int period, TimeSpan interval, Func<TradeBar, decimal> selector = null)
         {
             var ema = new ExponentialMovingAverage(symbol.ToString() + "_EMA_" + period + "_" + interval.ToString(), period);
+
+            // Calculate the daily actual max price difference
+            selector = selector ?? (x => Math.Max((Math.Max((Math.Max((Math.Max(x.High - x.Low,
+                x.High - x.Close)), x.Close - x.Low)), x.High - x.Open)), x.Open - x.Low));
+
             RegisterIndicator(symbol, ema, interval, selector);
             return ema;
         }
 
+        public Maximum MAX(Symbol symbol, int period, TimeSpan interval, Func<TradeBar, decimal> selector = null)
+        {
+            var max = new Maximum(symbol.ToString() + "_MAX_" + period + "_" + interval.ToString(), period);
+
+            // assign a default value for the selector function
+            if (selector == null)
+            {
+                selector = x => x.High;
+            }
+
+            RegisterIndicator(symbol, max, interval, selector);
+            return max;
+        }
+
         public void RegisterIndicator(Symbol symbol, IndicatorBase<IndicatorDataPoint> indicator, TimeSpan interval, Func<TradeBar, decimal> selector = null)
         {
-            // Calculate the daily actual max price difference 
-            selector = selector ?? (x => Math.Max((Math.Max((Math.Max((Math.Max(x.High - x.Low,
-                x.High - x.Close)), x.Close - x.Low)), x.High - x.Open)), x.Open - x.Low));
+            selector = selector ?? (x => x.Value);
 
             var consolidator = new TradeBarConsolidator(interval);
 
@@ -151,7 +169,6 @@ namespace QuantConnect.Algorithm.CSharp
             };
         }
 
-
         class SymbolData
         {
             public readonly Symbol Symbol;
@@ -163,6 +180,8 @@ namespace QuantConnect.Algorithm.CSharp
             }
 
             public readonly ExponentialMovingAverage EMA;
+            public readonly Maximum MAX;
+
 
             private readonly Turtle _algorithm;
 
@@ -172,9 +191,10 @@ namespace QuantConnect.Algorithm.CSharp
             {
                 Symbol = symbol;
                 Security = algorithm.Securities[symbol];
-                Position = 0;
+                Position = 0;                       //持仓上限（单位股）
 
-                EMA = algorithm.EMA(symbol, DAYINTERVAL, TimeSpan.FromDays(1));
+                EMA = algorithm.EMA(symbol, NUMDAYAVG, TimeSpan.FromDays(1));
+                MAX = algorithm.MAX(symbol, NUMDAYMAX, TimeSpan.FromDays(1));
 
                 // if we're receiving daily
 
