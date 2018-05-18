@@ -64,6 +64,7 @@ namespace QuantConnect.Algorithm.CSharp
                 Schedule.On(DateRules.EveryDay(val.Symbol), TimeRules.AfterMarketOpen(val.Symbol, -1), () =>
                 {
                     Debug("EveryDay." + val.Symbol.ToString() + " initialize at: " + Time);
+                    Transactions.CancelOpenOrders(val.Symbol);
                     val.Dailylastsettledprice = -1;
                 });
             }
@@ -154,7 +155,8 @@ namespace QuantConnect.Algorithm.CSharp
             }
         }
 
-        public ExponentialMovingAverage EMA(Symbol symbol, int period, TimeSpan interval, Func<TradeBar, decimal> selector = null)
+        public ExponentialMovingAverage EMA(Symbol symbol, int period, TimeSpan interval,
+            Func<TradeBar, decimal> selector = null)
         {
             var ema = new ExponentialMovingAverage(symbol.ToString() + "_EMA_" + period + "_" + interval.ToString(), period);
 
@@ -180,7 +182,8 @@ namespace QuantConnect.Algorithm.CSharp
             return max;
         }
 
-        public void RegisterIndicator(Symbol symbol, IndicatorBase<IndicatorDataPoint> indicator, TimeSpan interval, Func<TradeBar, decimal> selector = null)
+        public void RegisterIndicator(Symbol symbol, IndicatorBase<IndicatorDataPoint> indicator,
+            TimeSpan interval, Func<TradeBar, decimal> selector = null)
         {
             selector = selector ?? (x => x.Value);
 
@@ -216,7 +219,6 @@ namespace QuantConnect.Algorithm.CSharp
 
             public int Position { get; set; }                            //持仓上限（单位股）
             public decimal Dailylastsettledprice { get; set; }               //当日最近成交价
-            public bool Trading { get; set; }                               //some transactions on this stock is on going
 
             public SymbolData(Symbol symbol, Turtle algorithm)
             {
@@ -224,7 +226,6 @@ namespace QuantConnect.Algorithm.CSharp
                 Security = algorithm.Securities[symbol];
                 Position = 0;
                 Dailylastsettledprice = -1;
-                Trading = false;
 
                 Close = algorithm.Identity(symbol);
                 EMA = algorithm.EMA(symbol, NUMDAYAVG, TimeSpan.FromDays(1));
@@ -244,7 +245,7 @@ namespace QuantConnect.Algorithm.CSharp
             {
                 OrderTicket ticket;
                 TryEnter(out ticket);
-                TryExit(out ticket);
+                //TryExit(out ticket);
             }
 
             public bool TryEnter(out OrderTicket ticket)
@@ -259,20 +260,19 @@ namespace QuantConnect.Algorithm.CSharp
                     return false;
                 }
 
-                if (Dailylastsettledprice < 0 && !Trading)          //haven't made any trade current day
+                if (Dailylastsettledprice < 0 && _algorithm.Transactions.GetOpenOrders(Symbol).Count == 0)          
+                //haven't made any trade current day
                 {
                     if (Security.Low >= MAX)
                     {
                         ticket = _algorithm.LimitOrder(Symbol, 1, Security.Low, "TryEnter at: " + Security.Low);
-                        Trading = true;
                         return true;
                     }
-                } else if (Dailylastsettledprice > 0 && !Trading)
+                } else if (Dailylastsettledprice > 0 && _algorithm.Transactions.GetOpenOrders(Symbol).Count == 0)
                 {
                     if (Security.Low >= Dailylastsettledprice + EMA / 2)
                     {
                         ticket = _algorithm.LimitOrder(Symbol, 1, Security.Low, "TryEnter at: " + Security.Low);
-                        Trading = true;
                         return true;
                     }
                 }
@@ -280,36 +280,49 @@ namespace QuantConnect.Algorithm.CSharp
                 return false;
             }
 
-            public bool TryExit(out OrderTicket ticket)
-            {
-                const decimal exitTolerance = 1 + 2 * PercentTolerance;
+            //public bool TryExit(out OrderTicket ticket)
+            //{
+            //    const decimal exitTolerance = 1 + 2 * PercentTolerance;
 
-                ticket = null;
-                if (!Security.Invested)
-                {
-                    // can't exit if we haven't entered
-                    return false;
-                }
+            //    ticket = null;
+            //    if (!Security.Invested)
+            //    {
+            //        // can't exit if we haven't entered
+            //        return false;
+            //    }
 
-                decimal limit = 0m;
-                if (Security.Holdings.IsLong && Close * exitTolerance < EMA)
-                {
-                    limit = Security.High;
-                }
-                else if (Security.Holdings.IsShort && Close > EMA * exitTolerance)
-                {
-                    limit = Security.Low;
-                }
-                if (limit != 0)
-                {
-                    ticket = _algorithm.LimitOrder(Symbol, -Quantity, limit, "TryExit at: " + limit);
-                }
-                return -Quantity != 0;
-            }
+            //    decimal limit = 0m;
+            //    if (Security.Holdings.IsLong && Close * exitTolerance < EMA)
+            //    {
+            //        limit = Security.High;
+            //    }
+            //    else if (Security.Holdings.IsShort && Close > EMA * exitTolerance)
+            //    {
+            //        limit = Security.Low;
+            //    }
+            //    if (limit != 0)
+            //    {
+            //        ticket = _algorithm.LimitOrder(Symbol, -Quantity, limit, "TryExit at: "
+            //            + limit + " at: " + _algorithm.Time);
+            //    }
+            //    return -Quantity != 0;
+            //}
 
             public void OnOrderEvent(OrderEvent fill)
             {
-                
+                if (fill.Status == OrderStatus.Invalid)
+                {
+                    _algorithm.Debug(fill.Symbol.ToString() + "'s order: " +
+                        fill.OrderId + " is invalid at: " + _algorithm.Time);
+                    return;
+                }
+                if (fill.Status == OrderStatus.Filled)
+                {
+                    Dailylastsettledprice = fill.FillPrice;
+                    _algorithm.Debug(fill.Symbol.ToString() + "'s order: " +
+                        fill.OrderId + " is filled at: " + _algorithm.Time);
+                    return;
+                }
             }
         }
     }
