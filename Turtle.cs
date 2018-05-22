@@ -36,10 +36,11 @@ namespace QuantConnect.Algorithm.CSharp
     {
         //const values
         private const decimal TOTALCASH = 10000;                //总资金
-        private const int NUMDAYAVG = 1;                        //n日取平均值
-        private const int NUMDAYWU = 4;                         //warming up days
-        private const int NUMDAYMAX = 3;                        //n日取最大值
-        private const decimal ACCOUNTPERC = 0.01M;              //账户规模的百分比
+        private const int NUMDAYAVG = 20;                        //n日取平均值
+        private const int NUMDAYWU = 56;                         //warming up days
+        private const int NUMDAYMAX = 55;                        //n日取最大值
+        private const int NUMDAYMIN = 20;                        //n日取最小值
+        private const decimal ACCOUNTPERC = 0.01M;              //账户规模的百分比（用于确定每股头寸规模）
         private const decimal PERSIZELIMIT = 1000;              //每只证券头寸上限（单位：元）
 
         private readonly Dictionary<Symbol, SymbolData> _sd = new Dictionary<Symbol, SymbolData>();      //portfolio corresponding dic
@@ -50,8 +51,8 @@ namespace QuantConnect.Algorithm.CSharp
         public override void Initialize()
         {
             //set trade period
-            SetStartDate(2013, 10, 10);  //Set Start Date
-            SetEndDate(2013, 10, 11);    //Set End Date
+            SetStartDate(2010, 01, 01);  //Set Start Date
+            SetEndDate(2018, 05, 01);    //Set End Date
 
             //设置总资金
             SetCash(TOTALCASH);             //Set Strategy Cash
@@ -64,8 +65,7 @@ namespace QuantConnect.Algorithm.CSharp
                 Schedule.On(DateRules.EveryDay(val.Symbol), TimeRules.AfterMarketOpen(val.Symbol, -1), () =>
                 {
                     Debug("EveryDay." + val.Symbol.ToString() + " initialize at: " + Time);
-                    Transactions.CancelOpenOrders(val.Symbol);
-                    val.Dailylastsettledprice = -1;
+                    Transactions.CancelOpenOrders(val.Symbol);                  //close all open orders at the daily beginning
                 });
             }
             
@@ -96,23 +96,6 @@ namespace QuantConnect.Algorithm.CSharp
                     continue;
                 }
             }
-
-            //SetHoldings example
-            //if (!Portfolio.Invested)
-            //{
-            //    SetHoldings(_spy, 1);
-            //    Debug("Purchased Stock");
-            //    Debug("Remain cash: " + Portfolio.Cash);
-            //}
-
-            ////Creating an Order example
-            //if (!Portfolio.Invested)
-            //{
-            //    var bar = data[_ibm];
-            //    LimitOrder(_ibm, 10, bar.High + 0.1m);
-            //    Debug("Purchased stock at time: " + bar.Time);
-            //    Debug("Remain cash: " + Portfolio.Cash);
-            //}
         }
 
         public override void OnOrderEvent(OrderEvent fill)
@@ -129,8 +112,9 @@ namespace QuantConnect.Algorithm.CSharp
             _sd.Clear();
 
             //Add individual stocks.
-            AddEquity("SPY", Resolution.Minute, Market.USA);
-            AddEquity("IBM", Resolution.Minute, Market.USA);
+            AddEquity("AAPL", Resolution.Second, Market.USA);
+            AddEquity("IBM", Resolution.Second, Market.USA);
+            AddEquity("INTC", Resolution.Second, Market.USA);
 
             foreach (var security in Securities)
             {
@@ -182,6 +166,20 @@ namespace QuantConnect.Algorithm.CSharp
             return max;
         }
 
+        public Minimum MIN(Symbol symbol, int period, TimeSpan interval, Func<TradeBar, decimal> selector = null)
+        {
+            var min = new Minimum(symbol.ToString() + "_MIN_" + period + "_" + interval.ToString(), period);
+
+            // assign a default value for the selector function
+            if (selector == null)
+            {
+                selector = x => x.Low;
+            }
+
+            RegisterIndicator(symbol, min, interval, selector);
+            return min;
+        }
+
         public void RegisterIndicator(Symbol symbol, IndicatorBase<IndicatorDataPoint> indicator,
             TimeSpan interval, Func<TradeBar, decimal> selector = null)
         {
@@ -214,24 +212,24 @@ namespace QuantConnect.Algorithm.CSharp
             public readonly Identity Close;
             public readonly ExponentialMovingAverage EMA;
             public readonly Maximum MAX;
+            public readonly Minimum MIN;
 
             private readonly Turtle _algorithm;
 
             public int Position { get; set; }                            //持仓上限（单位股）
-            public decimal Dailylastsettledprice { get; set; }               //当日最近成交价
+            public decimal LastFillPrice { get; set; }               //最近成交价
 
             public SymbolData(Symbol symbol, Turtle algorithm)
             {
                 Symbol = symbol;
                 Security = algorithm.Securities[symbol];
                 Position = 0;
-                Dailylastsettledprice = -1;
+                LastFillPrice = -1;
 
                 Close = algorithm.Identity(symbol);
                 EMA = algorithm.EMA(symbol, NUMDAYAVG, TimeSpan.FromDays(1));
                 MAX = algorithm.MAX(symbol, NUMDAYMAX, TimeSpan.FromDays(1));
-
-                // if we're receiving daily
+                MIN = algorithm.MIN(symbol, NUMDAYMIN, TimeSpan.FromDays(1));
 
                 _algorithm = algorithm;
             }
@@ -243,12 +241,19 @@ namespace QuantConnect.Algorithm.CSharp
 
             public void Update()
             {
-                OrderTicket ticket;
-                TryEnter(out ticket);
-                //TryExit(out ticket);
+                //reset LastFillPrice
+                if ((int)(Security.Holdings.Quantity) == 0)
+                    LastFillPrice = -1;
+
+                OrderTicket ticket;                             //enter ticket
+                List<int> idlist;                                //force-quit id list
+
+                TryForceQuit(out idlist);                   //止损
+                TryExit(out idlist);                        //退出
+                TryEnter(out ticket);                       //入市
             }
 
-            public bool TryEnter(out OrderTicket ticket)
+            public void TryEnter(out OrderTicket ticket)
             {
                 ticket = null;
 
@@ -257,56 +262,56 @@ namespace QuantConnect.Algorithm.CSharp
                 if (Security.Holdings.Quantity >= hardlimit ||
                     Security.Holdings.Quantity >= Position)
                 {
-                    return false;
+                    return;
                 }
 
-                if (Dailylastsettledprice < 0 && _algorithm.Transactions.GetOpenOrders(Symbol).Count == 0)          
+                if (LastFillPrice < 0 && _algorithm.Transactions.GetOpenOrders(Symbol).Count == 0)
                 //haven't made any trade current day
                 {
                     if (Security.Low >= MAX)
                     {
-                        ticket = _algorithm.LimitOrder(Symbol, 1, Security.Low, "TryEnter at: " + Security.Low);
-                        return true;
+                        ticket = _algorithm.LimitOrder(Symbol, 1, Security.High, "TryEnter at: " + Security.Low);
+                        _algorithm.Debug("Enter one ticket for the symbol: "
+                            + Symbol.ToString() + " at: " + _algorithm.Time);
                     }
-                } else if (Dailylastsettledprice > 0 && _algorithm.Transactions.GetOpenOrders(Symbol).Count == 0)
+                } else if (LastFillPrice > 0 && _algorithm.Transactions.GetOpenOrders(Symbol).Count == 0)
                 {
-                    if (Security.Low >= Dailylastsettledprice + EMA / 2)
+                    if (Security.Low >= LastFillPrice + EMA / 2)
                     {
-                        ticket = _algorithm.LimitOrder(Symbol, 1, Security.Low, "TryEnter at: " + Security.Low);
-                        return true;
+                        ticket = _algorithm.LimitOrder(Symbol, 1, Security.High, "TryEnter at: " + Security.Low);
+                        _algorithm.Debug("Enter one ticket for the symbol: "
+                            + Symbol.ToString() + " at: " + _algorithm.Time);
                     }
                 }
-
-                return false;
             }
 
-            //public bool TryExit(out OrderTicket ticket)
-            //{
-            //    const decimal exitTolerance = 1 + 2 * PercentTolerance;
+            //退出
+            public void TryExit(out List<int> idlist)
+            {
+                idlist = null;
 
-            //    ticket = null;
-            //    if (!Security.Invested)
-            //    {
-            //        // can't exit if we haven't entered
-            //        return false;
-            //    }
+                if (Security.High < MIN)
+                {
+                    idlist = _algorithm.Liquidate(Symbol);  //Liquidate all holdings
+                    LastFillPrice = -1;                     //reset LastFillPrice
+                    _algorithm.Debug("exit for the symbol: "
+                            + Symbol.ToString() + " at: " + _algorithm.Time);
+                }
+            }
 
-            //    decimal limit = 0m;
-            //    if (Security.Holdings.IsLong && Close * exitTolerance < EMA)
-            //    {
-            //        limit = Security.High;
-            //    }
-            //    else if (Security.Holdings.IsShort && Close > EMA * exitTolerance)
-            //    {
-            //        limit = Security.Low;
-            //    }
-            //    if (limit != 0)
-            //    {
-            //        ticket = _algorithm.LimitOrder(Symbol, -Quantity, limit, "TryExit at: "
-            //            + limit + " at: " + _algorithm.Time);
-            //    }
-            //    return -Quantity != 0;
-            //}
+            //止损
+            public void TryForceQuit(out List<int> idlist)
+            {
+                idlist = null;
+
+                if (LastFillPrice - Security.High >= 2 * EMA)
+                {
+                    idlist = _algorithm.Liquidate(Symbol);  //Liquidate all holdings
+                    LastFillPrice = -1;                     //reset LastFillPrice
+                    _algorithm.Debug("Force quit for the symbol: "
+                            + Symbol.ToString() + " at: " + _algorithm.Time);
+                }
+            }
 
             public void OnOrderEvent(OrderEvent fill)
             {
@@ -318,7 +323,7 @@ namespace QuantConnect.Algorithm.CSharp
                 }
                 if (fill.Status == OrderStatus.Filled)
                 {
-                    Dailylastsettledprice = fill.FillPrice;
+                    LastFillPrice = fill.FillPrice;
                     _algorithm.Debug(fill.Symbol.ToString() + "'s order: " +
                         fill.OrderId + " is filled at: " + _algorithm.Time);
                     return;
