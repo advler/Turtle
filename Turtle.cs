@@ -46,7 +46,8 @@ namespace QuantConnect.Algorithm.CSharp
         private readonly Dictionary<Symbol, SymbolData> _sd = new Dictionary<Symbol, SymbolData>();      //portfolio corresponding dic
 
         /// <summary>
-        /// Initialise the data and resolution required, as well as the cash and start-end dates for your algorithm. All algorithms must initialized.
+        /// Initialise the data and resolution required, as well as the cash and
+        /// start-end dates for your algorithm. All algorithms must initialized.
         /// </summary>
         public override void Initialize()
         {
@@ -292,7 +293,7 @@ namespace QuantConnect.Algorithm.CSharp
 
                 if (Security.High < MIN)
                 {
-                    idlist = _algorithm.Liquidate(Symbol);  //Liquidate all holdings
+                    idlist = _algorithm.Liquidate(Symbol, "TryExit");  //Liquidate all holdings
                     LastFillPrice = -1;                     //reset LastFillPrice
                     _algorithm.Debug("exit for the symbol: "
                             + Symbol.ToString() + " at: " + _algorithm.Time);
@@ -306,7 +307,7 @@ namespace QuantConnect.Algorithm.CSharp
 
                 if (LastFillPrice - Security.High >= 2 * EMA)
                 {
-                    idlist = _algorithm.Liquidate(Symbol);  //Liquidate all holdings
+                    idlist = _algorithm.Liquidate(Symbol, "TryForceQuit");  //Liquidate all holdings
                     LastFillPrice = -1;                     //reset LastFillPrice
                     _algorithm.Debug("Force quit for the symbol: "
                             + Symbol.ToString() + " at: " + _algorithm.Time);
@@ -321,7 +322,7 @@ namespace QuantConnect.Algorithm.CSharp
                         fill.OrderId + " is invalid at: " + _algorithm.Time);
                     return;
                 }
-                if (fill.Status == OrderStatus.Filled)
+                if (fill.Status == OrderStatus.Filled && fill.FillQuantity > 0)
                 {
                     LastFillPrice = fill.FillPrice;
                     _algorithm.Debug(fill.Symbol.ToString() + "'s order: " +
